@@ -53,6 +53,9 @@
     "statements": 70
   },
   "dependencies": {
+    "@teachablemachine/image": "^0.8.5",
+    "@teachablemachine/pose": "^0.8.6",
+    "@tensorflow-models/speech-commands": "^0.5.4",
     "@vernier/godirect": "^1.5.0",
     "arraybuffer-loader": "^1.0.6",
     "atob": "^2.1.2",
