@@ -29,6 +29,8 @@ const builtinExtensions = {
     poseHand: () => require("../extensions/scratch3_pose_hand"),
 };
 
+console.log("console log from extension manager");
+
 /**
  * @typedef {object} ArgumentInfo - Information about an extension block argument
  * @property {ArgumentType} type - the type of value this argument can take
