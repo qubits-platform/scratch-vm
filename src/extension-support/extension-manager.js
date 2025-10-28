@@ -26,7 +26,7 @@ const builtinExtensions = {
     gdxfor: () => require("../extensions/scratch3_gdx_for"),
     teachableMachine: () => require("../extensions/scratch3_teachable_machine"),
     poseFace: () => require("../extensions/scratch3_pose_face"),
-    // poseHand: () => require("../extensions/scratch3_pose_hand"),
+    poseHand: () => require("../extensions/scratch3_pose_hand"),
 };
 
 console.log("console log from extension manager");
