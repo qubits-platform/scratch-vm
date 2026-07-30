@@ -14,6 +14,8 @@ const tmImage = require("@teachablemachine/image");
 const tmPose = require("@teachablemachine/pose");
 const tmAudioSpeechCommands = require("@tensorflow-models/speech-commands");
 
+const { isQubitModelUrl, loadQubitModel } = require("./qubit-model");
+
 /**
  * Icon svg to be displayed in the blocks category menu, encoded as a data URI.
  * @type {string}
@@ -625,6 +627,10 @@ class Scratch3VideoSensingBlocks {
     }
 
     modelArgumentToURL(modelArg) {
+
+        if (isQubitModelUrl(modelArg)) {
+            return modelArg;
+        }
         return modelArg.startsWith(
             "https://teachablemachine.withgoogle.com/models/"
         )
@@ -740,12 +746,25 @@ class Scratch3VideoSensingBlocks {
                 this.runtime.requestToolboxExtensionsUpdate();
             } catch (e) {
                 this.predictionState[modelDataUrl] = {};
-                console.log("Model initialization failure!", e);
+                // The myQubit path can fail on auth, CORS or missing weights,
+                // so surface which model failed and why rather than a bare log.
+                console.error(
+                    `Model initialization failure for ${modelDataUrl}:`,
+                    e && e.message ? e.message : e
+                );
+                this.runtime.emit(
+                    this.runtime.constructor.PERIPHERAL_DISCONNECTED
+                );
             }
         }
     }
 
     async initModel(modelUrl) {
+        if (isQubitModelUrl(modelUrl)) {
+            const model = await loadQubitModel(modelUrl);
+            return { model, type: ModelType.IMAGE };
+        }
+
         const modelURL = `${modelUrl}model.json`;
         const metadataURL = `${modelUrl}metadata.json`;
         const customMobileNet = await tmImage.load(modelURL, metadataURL);
