@@ -1,5 +1,6 @@
 const path = require('path');
 
+const webpack = require('webpack');
 const CopyWebpackPlugin = require('copy-webpack-plugin');
 
 const ScratchWebpackConfigBuilder = require('scratch-webpack-configuration');
@@ -34,7 +35,12 @@ const webBuilder = new ScratchWebpackConfigBuilder(common)
         },
         resolve: {
             fallback: {
-                Buffer: require.resolve('buffer/')
+                Buffer: require.resolve('buffer/'),
+                // @tensorflow-models/speech-commands imports `promisify` from 'util' and
+                // lazily requires 'fs' for file:// model URLs. webpack 5 no longer polyfills
+                // node core modules automatically.
+                util: require.resolve('util/'),
+                fs: false
             }
         },
         output: {
@@ -43,6 +49,11 @@ const webBuilder = new ScratchWebpackConfigBuilder(common)
             }
         }
     })
+    .addPlugin(new webpack.ProvidePlugin({
+        // The `util` polyfill above reads `process.env.NODE_DEBUG` at module scope.
+        // webpack 5 no longer provides a `process` global automatically.
+        process: require.resolve('process/browser.js')
+    }))
     .addModuleRule({
         test: /\.mp3$/,
         type: 'asset'
