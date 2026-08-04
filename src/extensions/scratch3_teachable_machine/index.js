@@ -78,6 +78,7 @@ const ModelType = {
     POSE: "pose",
     IMAGE: "image",
     AUDIO: "audio",
+    TEXT: "text",
 };
 
 const EXTENSION_ID = "teachableMachine";
@@ -252,7 +253,10 @@ class Scratch3VideoSensingBlocks {
 
         // TOOD: Self-throttle interval if slow to run predictions
         const isAudioModel = this.isAudio();
-        if (isAudioModel) {
+        if (this.isText()) {
+            // Text models are driven by the classify block, not by this loop.
+            return;
+        } else if (isAudioModel) {
             this.predictAllBlocks(null);
             this._lastUpdate = time;
             this._isPredicting = 0;
@@ -502,6 +506,21 @@ class Scratch3VideoSensingBlocks {
                 },
             },
             {
+                opcode: "classifyTextBlock",
+                text: formatMessage({
+                    id: "teachableMachine.classifyText",
+                    default: "classify text [TEXT]",
+                    description:
+                        "Command that runs a text model over the given text",
+                }),
+                arguments: {
+                    TEXT: {
+                        type: ArgumentType.STRING,
+                        defaultValue: "hello",
+                    },
+                },
+            },
+            {
                 opcode: "modelPrediction",
                 text: formatMessage({
                     id: "teachableMachine.modelPrediction",
@@ -735,6 +754,47 @@ class Scratch3VideoSensingBlocks {
         );
     }
 
+    isText() {
+        return (
+            this.predictionState &&
+            this.predictionState[this.teachableImageModel] &&
+            this.predictionState[this.teachableImageModel].modelType ===
+                ModelType.TEXT
+        );
+    }
+
+    /**
+     * A scratch command block handle that classifies a piece of text and
+     * stores the result where the prediction blocks read it.
+     * @param {object} args - the block arguments
+     * @param {string} args.TEXT - the text to classify
+     * @returns {Promise} resolves once the prediction has been stored
+     */
+    async classifyTextBlock(args) {
+        const modelUrl = this.teachableImageModel;
+        if (!modelUrl) {
+            return;
+        }
+        if (!this.predictionState.hasOwnProperty(modelUrl)) {
+            // Loading a text model pulls down a sentence encoder, so the first
+            // call waits for it rather than quietly doing nothing.
+            await this.startPredicting(modelUrl);
+        }
+
+        const predictionState = this.predictionState[modelUrl];
+        if (!predictionState || predictionState.modelType !== ModelType.TEXT) {
+            return;
+        }
+
+        // Unlike video and audio there is no loop feeding this model, so the
+        // block does the prediction itself.
+        predictionState.topClass = await this.predictModel(
+            modelUrl,
+            Cast.toString(args.TEXT)
+        );
+        this.runtime.emit(this.runtime.constructor.PERIPHERAL_CONNECTED);
+    }
+
     async startPredicting(modelDataUrl) {
         if (!this.predictionState[modelDataUrl]) {
             try {
@@ -744,6 +804,23 @@ class Scratch3VideoSensingBlocks {
                 this.predictionState[modelDataUrl].modelType = type;
                 this.predictionState[modelDataUrl].model = model;
                 this.runtime.requestToolboxExtensionsUpdate();
+
+                // Listening prompts for the microphone, which the user can sit
+                // on or refuse. Doing it after the toolbox update means the
+                // class list appears either way, and a refusal does not throw
+                // away a model that loaded fine.
+                if (type === ModelType.AUDIO && !model.isListening()) {
+                    try {
+                        await this.startAudioListening(model);
+                    } catch (micError) {
+                        console.error(
+                            `Microphone unavailable for ${modelDataUrl}:`,
+                            micError && micError.message
+                                ? micError.message
+                                : micError
+                        );
+                    }
+                }
             } catch (e) {
                 this.predictionState[modelDataUrl] = {};
                 // The myQubit path can fail on auth, CORS or missing weights,
@@ -759,10 +836,34 @@ class Scratch3VideoSensingBlocks {
         }
     }
 
+    /**
+     * Point a speech-commands recognizer at the microphone and keep its most
+     * recent scores where the prediction loop can read them.
+     * @param {SpeechCommandRecognizer} recognizer - a loaded recognizer
+     * @returns {Promise} resolves once the recognizer is listening
+     */
+    startAudioListening(recognizer) {
+        // Scores are read back positionally against the new recognizer's
+        // labels, so results left over from another model must not survive.
+        this.latestAudioResults = null;
+        return recognizer.listen(
+            (result) => {
+                this.latestAudioResults = result;
+            },
+            {
+                includeSpectrogram: true, // in case listen should return result.spectrogram
+                probabilityThreshold: 0.75,
+                invokeCallbackOnNoiseAndUnknown: true,
+                overlapFactor: 0.5, // probably want between 0.5 and 0.75. More info in README
+            }
+        );
+    }
+
     async initModel(modelUrl) {
         if (isQubitModelUrl(modelUrl)) {
-            const model = await loadQubitModel(modelUrl);
-            return { model, type: ModelType.IMAGE };
+            // Listening is started by startPredicting, once the classes are
+            // registered.
+            return loadQubitModel(modelUrl);
         }
 
         const modelURL = `${modelUrl}model.json`;
@@ -782,17 +883,6 @@ class Scratch3VideoSensingBlocks {
                 metadataURL
             );
             await recognizer.ensureModelLoaded();
-            await recognizer.listen(
-                (result) => {
-                    this.latestAudioResults = result;
-                },
-                {
-                    includeSpectrogram: true, // in case listen should return result.spectrogram
-                    probabilityThreshold: 0.75,
-                    invokeCallbackOnNoiseAndUnknown: true,
-                    overlapFactor: 0.5, // probably want between 0.5 and 0.75. More info in README
-                }
-            );
             return { model: recognizer, type: ModelType.AUDIO };
         } else if (
             customMobileNet._metadata.packageName === "@teachablemachine/pose"
@@ -827,6 +917,9 @@ class Scratch3VideoSensingBlocks {
     async getPredictionFromModel(modelUrl, frame) {
         const { model, modelType } = this.predictionState[modelUrl];
         switch (modelType) {
+            case ModelType.TEXT:
+                // `frame` is the text, passed through by classifyTextBlock.
+                return await model.predict(frame);
             case ModelType.IMAGE:
                 const imageBitmap = await createImageBitmap(frame);
                 return await model.predict(imageBitmap);
