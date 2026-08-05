@@ -586,7 +586,7 @@ class Scratch3VideoSensingBlocks {
             id: EXTENSION_ID,
             name: formatMessage({
                 id: "videoSensing.categoryName",
-                default: "Teachable Machine",
+                default: "Teachable Machines - vm",
                 description:
                     "Label for the Teachable Machine extension category",
             }),
