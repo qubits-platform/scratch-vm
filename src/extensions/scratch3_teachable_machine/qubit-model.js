@@ -8,6 +8,58 @@ const tmAudioSpeechCommands = require("@tensorflow-models/speech-commands");
 const { loadPoseNet } = require("@teachablemachine/pose/dist/custom-posenet");
 
 
+/**
+ * Bump this whenever this file changes. It is printed as soon as the module is
+ * evaluated, so the console immediately says which build a deployment is
+ * actually running - the difference between "the code is broken" and "the code
+ * was never shipped".
+ * @type {string}
+ */
+const QUBIT_MODEL_BUILD = "2026-08-05-debug1";
+
+/**
+ * Logging is on by default so a deployed environment can be debugged without a
+ * rebuild. Silence it from the console with:
+ *   window.__QUBIT_MODEL_DEBUG = false
+ * @returns {boolean} whether to emit debug output
+ */
+const debugEnabled = () =>
+    typeof window === "undefined" || window.__QUBIT_MODEL_DEBUG !== false;
+
+const LOG_PREFIX = "[qubit-model]";
+
+const log = (...args) => {
+    if (debugEnabled()) {
+        console.log(LOG_PREFIX, ...args);
+    }
+};
+
+const logError = (...args) => {
+    // Errors are never silenced - they are the reason anyone is reading this.
+    console.error(LOG_PREFIX, ...args);
+};
+
+/**
+ * Milliseconds since page load, for timing individual steps. performance is not
+ * guaranteed to exist in every host the VM runs in.
+ * @returns {number} a monotonic-ish timestamp
+ */
+const now = () =>
+    typeof performance !== "undefined" && performance.now
+        ? performance.now()
+        : Date.now();
+
+/**
+ * @param {number} startedAt - a timestamp from now()
+ * @returns {string} elapsed time, formatted
+ */
+const since = (startedAt) => `${Math.round(now() - startedAt)}ms`;
+
+log(
+    `module loaded, build ${QUBIT_MODEL_BUILD}. ` +
+        `Set window.__QUBIT_MODEL_DEBUG = false to silence this.`
+);
+
 const QUBIT_HOST_PATTERN = /(^|\.)myqubit\.co$/i;
 
 const IMAGE_SIZE = 224;
@@ -95,6 +147,7 @@ let authTokenProvider = null;
 
 
 const setAuthTokenProvider = (provider) => {
+    log("setAuthTokenProvider called, provider is", typeof provider);
     authTokenProvider = provider;
 };
 
@@ -106,17 +159,23 @@ let assetBaseUrlOverride = null;
  * @param {?string} baseUrl - a base URL, or null to go back to deriving it
  */
 const setAssetBaseUrl = (baseUrl) => {
+    log("setAssetBaseUrl called with", baseUrl);
     assetBaseUrlOverride = baseUrl;
 };
 
 
 const resolveAssetBaseUrl = (modelUrl) => {
     if (assetBaseUrlOverride) {
+        log("resolveAssetBaseUrl: using override ->", assetBaseUrlOverride);
         return assetBaseUrlOverride;
     }
     const { protocol, host } = new URL(modelUrl);
     const assetHost = host.startsWith("static.") ? host : `static.${host}`;
-    return `${protocol}//${assetHost}/`;
+    const resolved = `${protocol}//${assetHost}/`;
+    log(
+        `resolveAssetBaseUrl: no override set, derived from model host "${host}" -> ${resolved}`
+    );
+    return resolved;
 };
 
 
@@ -128,9 +187,18 @@ const featureExtractorCache = {};
  */
 const isQubitModelUrl = (modelArg) => {
     try {
-        return QUBIT_HOST_PATTERN.test(new URL(modelArg).hostname);
+        const { hostname } = new URL(modelArg);
+        const matched = QUBIT_HOST_PATTERN.test(hostname);
+        log(
+            `isQubitModelUrl("${modelArg}"): hostname "${hostname}" -> ${matched}`
+        );
+        return matched;
     } catch (e) {
         // Not an absolute URL, so it is a bare Teachable Machine model id.
+        log(
+            `isQubitModelUrl("${modelArg}"): not an absolute URL, ` +
+                `treating as a Teachable Machine model id`
+        );
         return false;
     }
 };
@@ -143,6 +211,18 @@ const buildRequestInit = () => {
     const token = authTokenProvider ? authTokenProvider() : null;
     if (token) {
         init.headers = { Authorization: `Bearer ${token}` };
+    }
+    log("buildRequestInit:", {
+        credentials: init.credentials,
+        hasAuthTokenProvider: Boolean(authTokenProvider),
+        hasToken: Boolean(token),
+    });
+    if (!authTokenProvider) {
+        log(
+            "buildRequestInit: no auth token provider registered - requests " +
+                "rely entirely on cookies, which are not sent cross-site " +
+                "unless the session cookie is SameSite=None; Secure."
+        );
     }
     return init;
 };
@@ -273,19 +353,63 @@ class QubitImageModel {
 
 
 const fetchWeights = async (trainingConfig, origin) => {
+    log("fetchWeights: START");
+
     const manifest = trainingConfig.modelJson.weightsManifest;
+    if (!manifest || !manifest[0] || !manifest[0].weights) {
+        logError(
+            "fetchWeights: weightsManifest is missing or malformed:",
+            manifest
+        );
+        throw new Error("Model response has a missing or malformed weightsManifest.");
+    }
     const weightSpecs = manifest[0].weights;
+    log(
+        `fetchWeights: manifest has ${weightSpecs.length} tensors, ` +
+            `paths = ${JSON.stringify(manifest[0].paths)}`
+    );
 
     // weightsPath is origin-relative ("ml-models/..."), not relative to the
     // model endpoint - resolving against the latter would duplicate the prefix.
     const weightsUrl = new URL(trainingConfig.weightsPath, origin).href;
-    const response = await fetch(weightsUrl, buildRequestInit());
+    log("fetchWeights: weightsPath (raw) =", trainingConfig.weightsPath);
+    log("fetchWeights: origin            =", origin);
+    log("fetchWeights: ABOUT TO FETCH    =", weightsUrl);
+
+    const startedAt = now();
+    let response;
+    try {
+        response = await fetch(weightsUrl, buildRequestInit());
+    } catch (e) {
+        // A network-layer failure (CORS rejection, DNS, blocked by CSP) never
+        // produces a response object, so it must be reported separately or it
+        // looks identical to a bad status code.
+        logError(
+            `fetchWeights: fetch REJECTED after ${since(startedAt)} for ${weightsUrl}`,
+            e
+        );
+        logError(
+            "fetchWeights: a rejected fetch (rather than a bad status) usually " +
+                "means CORS, DNS or a Content-Security-Policy connect-src block. " +
+                "Check the Network tab entry for this URL and the CSP on the page."
+        );
+        throw e;
+    }
+
+    log(
+        `fetchWeights: response in ${since(startedAt)} - ` +
+            `status ${response.status}, ok=${response.ok}, type=${response.type}`
+    );
     if (!response.ok) {
+        logError(
+            `fetchWeights: bad status ${response.status} from ${weightsUrl}`
+        );
         throw new Error(
             `Could not fetch model weights (HTTP ${response.status}) from ${weightsUrl}`
         );
     }
     const weightData = await response.arrayBuffer();
+    log(`fetchWeights: downloaded ${weightData.byteLength} bytes`);
 
     // A truncated download or an error page would otherwise fail deep inside
     // tfjs with an unreadable message.
@@ -296,20 +420,28 @@ const fetchWeights = async (trainingConfig, origin) => {
             0
         ) * 4;
     if (weightData.byteLength !== expectedBytes) {
+        logError(
+            `fetchWeights: SIZE MISMATCH - got ${weightData.byteLength}, ` +
+                `expected ${expectedBytes}. A response this size is often an ` +
+                `HTML error/login page rather than a .bin.`
+        );
         throw new Error(
             `Model weights are ${weightData.byteLength} bytes, expected ${expectedBytes}.`
         );
     }
 
+    log("fetchWeights: DONE, size matches manifest");
     return { weightSpecs, weightData };
 };
 
 
 const loadHead = async (trainingConfig, origin) => {
+    log("loadHead: START");
     const { weightSpecs, weightData } = await fetchWeights(
         trainingConfig,
         origin
     );
+    log("loadHead: handing artifacts to tf.loadLayersModel");
 
     return tf.loadLayersModel(
         tf.io.fromMemory({
@@ -320,13 +452,24 @@ const loadHead = async (trainingConfig, origin) => {
             generatedBy: trainingConfig.modelJson.generatedBy,
             convertedBy: trainingConfig.modelJson.convertedBy,
         })
-    );
+    ).then((head) => {
+        log(
+            "loadHead: DONE, head input shape =",
+            JSON.stringify(head.inputs[0].shape)
+        );
+        return head;
+    });
 };
 
 /**
  * @param {object} metadata - trainingConfig.metadata for an audio model
  */
 const checkAudioSettings = (metadata) => {
+    log("checkAudioSettings: embeddingModel =", metadata.embeddingModel);
+    log(
+        "checkAudioSettings: audioSettings =",
+        JSON.stringify(metadata.audioSettings)
+    );
     if (
         metadata.embeddingModel &&
         metadata.embeddingModel !== AUDIO_EMBEDDING_MODEL
@@ -355,6 +498,7 @@ const checkAudioSettings = (metadata) => {
                 `browser recognizer always uses ${BROWSER_FFT_SIZE}.`
         );
     }
+    log("checkAudioSettings: OK");
 };
 
 /**
@@ -370,6 +514,7 @@ const loadAudioRecognizer = async (
     labels,
     origin
 ) => {
+    log("loadAudioRecognizer: START");
     checkAudioSettings(metadata);
 
     const { weightSpecs, weightData } = await fetchWeights(
@@ -396,7 +541,22 @@ const loadAudioRecognizer = async (
             wordLabels: labels,
         }
     );
-    await recognizer.ensureModelLoaded();
+    log(
+        "loadAudioRecognizer: recognizer created, calling ensureModelLoaded(). " +
+            "If this is the last line you see, speech-commands is trying to " +
+            "reach its own model host and failing."
+    );
+    const startedAt = now();
+    try {
+        await recognizer.ensureModelLoaded();
+    } catch (e) {
+        logError(
+            `loadAudioRecognizer: ensureModelLoaded FAILED after ${since(startedAt)}`,
+            e
+        );
+        throw e;
+    }
+    log(`loadAudioRecognizer: DONE in ${since(startedAt)}`);
     return recognizer;
 };
 
@@ -455,11 +615,27 @@ const getPosenet = (settings) => {
         settings.multiplier,
     ].join("_");
     if (!posenetCache[key]) {
-        posenetCache[key] = loadPoseNet({ posenet: settings }).catch((e) => {
-            // Do not cache a rejected promise, or every later attempt fails.
-            delete posenetCache[key];
-            throw e;
-        });
+        log(
+            `getPosenet: cache miss for "${key}", downloading PoseNet ` +
+                `(this goes to Google's model host, not myQubit)`
+        );
+        const startedAt = now();
+        posenetCache[key] = loadPoseNet({ posenet: settings })
+            .then((net) => {
+                log(`getPosenet: loaded in ${since(startedAt)}`);
+                return net;
+            })
+            .catch((e) => {
+                // Do not cache a rejected promise, or every later attempt fails.
+                logError(
+                    `getPosenet: FAILED after ${since(startedAt)} for "${key}"`,
+                    e
+                );
+                delete posenetCache[key];
+                throw e;
+            });
+    } else {
+        log(`getPosenet: cache hit for "${key}"`);
     }
     return posenetCache[key];
 };
@@ -483,18 +659,24 @@ const loadPoseModel = async (trainingConfig, metadata, labels, origin) => {
     }
 
     const settings = resolvePosenetSettings(metadata);
+    log("loadPoseModel: posenet settings =", JSON.stringify(settings));
 
     // The head and PoseNet are independent, so fetch in parallel.
+    log("loadPoseModel: loading head + PoseNet in parallel");
     const [head, posenetModel] = await Promise.all([
         loadHead(trainingConfig, origin),
         getPosenet(settings),
     ]);
+    log("loadPoseModel: both head and PoseNet resolved");
 
     // If these disagree the head was trained against differently configured
     // PoseNet and predictions would be confident nonsense rather than an
     // obvious failure.
     const expectedDim = head.inputs[0].shape[1];
     const actualDim = posenetOutputDim(settings);
+    log(
+        `loadPoseModel: head expects ${expectedDim}-d, PoseNet produces ${actualDim}-d`
+    );
     if (actualDim !== null && expectedDim !== actualDim) {
         head.dispose();
         throw new Error(
@@ -504,6 +686,7 @@ const loadPoseModel = async (trainingConfig, metadata, labels, origin) => {
         );
     }
 
+    log("loadPoseModel: DONE");
     // CustomPoseNet is exactly the shape the extension's pose branch expects:
     // estimatePose() then predict() on the embedding it returns.
     return new tmPose.CustomPoseNet(head, posenetModel, {
@@ -532,6 +715,15 @@ const setTransformersUrl = (url) => {
 const getTransformers = () => {
     if (!transformersPromise) {
         const url = transformersUrlOverride || TRANSFORMERS_CDN_URL;
+        log(
+            `getTransformers: importing transformers.js from ${url} ` +
+                `(${transformersUrlOverride ? "override" : "default CDN"})`
+        );
+        log(
+            "getTransformers: this is a cross-origin dynamic import - a strict " +
+                "Content-Security-Policy script-src will block it here."
+        );
+        const startedAt = now();
         // Built via Function so webpack leaves the import alone instead of
         // trying to resolve the URL at build time.
         // eslint-disable-next-line no-new-func
@@ -539,6 +731,7 @@ const getTransformers = () => {
         transformersPromise = Promise.resolve()
             .then(importTransformers)
             .then((module) => {
+                log(`getTransformers: imported in ${since(startedAt)}`);
                 const env = module.env;
                 // There is no local model directory to search, and the wasm
                 // backend is unreliable with threads in some browsers.
@@ -550,13 +743,20 @@ const getTransformers = () => {
                 if (env.backends && env.backends.onnx && env.backends.onnx.wasm) {
                     env.backends.onnx.wasm.numThreads = 1;
                 }
+                log("getTransformers: env configured, module ready");
                 return module;
             })
             .catch((e) => {
                 // Do not cache a rejected promise, or every later attempt fails.
+                logError(
+                    `getTransformers: FAILED after ${since(startedAt)} loading ${url}`,
+                    e
+                );
                 transformersPromise = null;
                 throw e;
             });
+    } else {
+        log("getTransformers: reusing cached module promise");
     }
     return transformersPromise;
 };
@@ -569,14 +769,30 @@ const embedderCache = {};
  */
 const getTextEmbedder = (embeddingModel) => {
     if (!embedderCache[embeddingModel]) {
+        log(
+            `getTextEmbedder: building pipeline for "${embeddingModel}" ` +
+                `(weights download comes from the Hugging Face CDN)`
+        );
+        const startedAt = now();
         embedderCache[embeddingModel] = getTransformers()
             .then((module) =>
                 module.pipeline("feature-extraction", embeddingModel)
             )
+            .then((pipe) => {
+                log(`getTextEmbedder: pipeline ready in ${since(startedAt)}`);
+                return pipe;
+            })
             .catch((e) => {
+                logError(
+                    `getTextEmbedder: FAILED after ${since(startedAt)} for ` +
+                        `"${embeddingModel}"`,
+                    e
+                );
                 delete embedderCache[embeddingModel];
                 throw e;
             });
+    } else {
+        log(`getTextEmbedder: cache hit for "${embeddingModel}"`);
     }
     return embedderCache[embeddingModel];
 };
@@ -646,22 +862,30 @@ class QubitTextModel {
 const loadTextModel = async (trainingConfig, metadata, labels, origin) => {
     const embeddingModel =
         metadata.embeddingModel || DEFAULT_TEXT_EMBEDDING_MODEL;
+    log("loadTextModel: START, embeddingModel =", embeddingModel);
 
     // The head and the sentence encoder are independent, so fetch in parallel.
+    log("loadTextModel: loading head + sentence encoder in parallel");
     const [head, embedder] = await Promise.all([
         loadHead(trainingConfig, origin),
         getTextEmbedder(embeddingModel),
     ]);
+    log("loadTextModel: both head and encoder resolved");
 
     // Embedding once up front both warms the pipeline and pins down the
     // encoder's real output size. If it disagrees with the head, the head was
     // trained against a different encoder and predictions would be confident
     // nonsense rather than an obvious failure.
     const expectedDim = head.inputs[0].shape[1];
+    log("loadTextModel: running probe embedding to confirm encoder output size");
     const probe = await embedder("probe", {
         pooling: "mean",
         normalize: true,
     });
+    log(
+        `loadTextModel: head expects ${expectedDim}-d, encoder produced ` +
+            `${probe.data.length}-d`
+    );
     if (probe.data.length !== expectedDim) {
         head.dispose();
         throw new Error(
@@ -670,6 +894,7 @@ const loadTextModel = async (trainingConfig, metadata, labels, origin) => {
         );
     }
 
+    log("loadTextModel: DONE");
     return new QubitTextModel(head, embedder, labels);
 };
 
@@ -678,24 +903,55 @@ const loadTextModel = async (trainingConfig, metadata, labels, origin) => {
  * @returns {object} the trainingConfig, validated
  */
 const validatePayload = (payload) => {
+    log("validatePayload: START");
+    log("validatePayload: top-level keys =", Object.keys(payload || {}));
+
     const trainingConfig =
         payload && payload.trainingData && payload.trainingData.trainingConfig;
     if (!trainingConfig) {
+        logError(
+            "validatePayload: trainingData.trainingConfig missing. " +
+                "trainingData keys =",
+            Object.keys((payload && payload.trainingData) || {})
+        );
         throw new Error("Model response has no trainingData.trainingConfig.");
     }
+    log("validatePayload: trainingConfig keys =", Object.keys(trainingConfig));
+
     if (!trainingConfig.modelJson || !trainingConfig.modelJson.modelTopology) {
+        logError(
+            "validatePayload: modelJson.modelTopology missing. modelJson keys =",
+            Object.keys(trainingConfig.modelJson || {})
+        );
         throw new Error("Model response has no modelJson.modelTopology.");
     }
     if (!trainingConfig.weightsPath) {
+        logError("validatePayload: weightsPath missing");
         throw new Error("Model response has no weightsPath.");
     }
+    log("validatePayload: weightsPath =", trainingConfig.weightsPath);
 
     const metadata = trainingConfig.metadata || {};
     const rawModelType =
         metadata.modelType ||
         (payload.modelMetadata && payload.modelMetadata.type);
     const modelType = MODEL_TYPES[rawModelType];
+    log(
+        `validatePayload: metadata.modelType = ${JSON.stringify(metadata.modelType)}, ` +
+            `modelMetadata.type = ${JSON.stringify(
+                payload.modelMetadata && payload.modelMetadata.type
+            )}`
+    );
+    log(
+        `validatePayload: raw type "${rawModelType}" -> mapped "${modelType}". ` +
+            `Known keys: ${Object.keys(MODEL_TYPES).join(", ")}`
+    );
     if (!modelType) {
+        logError(
+            `validatePayload: UNRECOGNISED MODEL TYPE "${rawModelType}". ` +
+                `The lookup is case-sensitive and hyphenated. If this build is ` +
+                `older than audio/pose/text support, that is the real problem.`
+        );
         throw new Error(
             `Model type "${rawModelType}" is not supported yet - only image, audio, pose and text classification are.`
         );
@@ -703,8 +959,10 @@ const validatePayload = (payload) => {
 
     const labels = metadata.labels || trainingConfig.classLabels;
     if (!Array.isArray(labels) || labels.length === 0) {
+        logError("validatePayload: no class labels found");
         throw new Error("Model response has no class labels.");
     }
+    log(`validatePayload: DONE - ${labels.length} labels:`, labels);
 
     return { trainingConfig, metadata, labels, modelType };
 };
@@ -717,17 +975,38 @@ const validatePayload = (payload) => {
  *   that still needs `listen()` called on it.
  */
 const loadQubitModel = async (modelUrl) => {
-    const response = await fetch(modelUrl, buildRequestInit());
+    const startedAt = now();
+    log("=".repeat(60));
+    log(`loadQubitModel: START build ${QUBIT_MODEL_BUILD}`);
+    log("loadQubitModel: modelUrl =", modelUrl);
+    log(
+        "loadQubitModel: page origin =",
+        typeof location === "undefined" ? "(no location)" : location.origin
+    );
+
+    let response;
+    try {
+        response = await fetch(modelUrl, buildRequestInit());
+    } catch (e) {
+        logError("loadQubitModel: model fetch REJECTED (network/CORS/CSP)", e);
+        throw e;
+    }
+    log(
+        `loadQubitModel: model response status ${response.status}, ` +
+            `ok=${response.ok}, type=${response.type}`
+    );
     if (!response.ok) {
         throw new Error(
             `Could not fetch model (HTTP ${response.status}) from ${modelUrl}`
         );
     }
     const payload = await response.json();
+    log("loadQubitModel: payload parsed");
 
     const { trainingConfig, metadata, labels, modelType } =
         validatePayload(payload);
     const origin = resolveAssetBaseUrl(modelUrl);
+    log(`loadQubitModel: TAKING THE "${modelType}" BRANCH`);
 
     if (modelType === "audio") {
         const recognizer = await loadAudioRecognizer(
@@ -736,6 +1015,7 @@ const loadQubitModel = async (modelUrl) => {
             labels,
             origin
         );
+        log(`loadQubitModel: SUCCESS (audio) in ${since(startedAt)}`);
         return { model: recognizer, type: modelType };
     }
 
@@ -746,6 +1026,7 @@ const loadQubitModel = async (modelUrl) => {
             labels,
             origin
         );
+        log(`loadQubitModel: SUCCESS (pose) in ${since(startedAt)}`);
         return { model: poseModel, type: modelType };
     }
 
@@ -756,9 +1037,11 @@ const loadQubitModel = async (modelUrl) => {
             labels,
             origin
         );
+        log(`loadQubitModel: SUCCESS (text) in ${since(startedAt)}`);
         return { model: textModel, type: modelType };
     }
 
+    log("loadQubitModel: image branch, embeddingModel =", metadata.embeddingModel);
     // The head and the feature extractor are independent, so fetch in parallel.
     const [head, featureExtractor] = await Promise.all([
         loadHead(trainingConfig, origin),
@@ -772,6 +1055,9 @@ const loadQubitModel = async (modelUrl) => {
         featureExtractor.outputs[0].shape[
             featureExtractor.outputs[0].shape.length - 1
         ];
+    log(
+        `loadQubitModel: head expects ${expectedDim}-d, extractor produces ${actualDim}-d`
+    );
     if (expectedDim !== actualDim) {
         head.dispose();
         throw new Error(
@@ -779,13 +1065,21 @@ const loadQubitModel = async (modelUrl) => {
         );
     }
 
+    log(`loadQubitModel: SUCCESS (image) in ${since(startedAt)}`);
     return {
         model: new QubitImageModel(head, featureExtractor, labels),
         type: modelType,
     };
 };
 
+// Hung off window as well as exported, so the build a deployment is running can
+// be checked from the console without digging through the bundle.
+if (typeof window !== "undefined") {
+    window.__QUBIT_MODEL_BUILD = QUBIT_MODEL_BUILD;
+}
+
 module.exports = {
+    QUBIT_MODEL_BUILD,
     isQubitModelUrl,
     loadQubitModel,
     setAuthTokenProvider,
