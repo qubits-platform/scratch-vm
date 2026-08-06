@@ -586,7 +586,7 @@ class Scratch3VideoSensingBlocks {
             id: EXTENSION_ID,
             name: formatMessage({
                 id: "videoSensing.categoryName",
-                default: "Teachable Machines - vm",
+                default: "Teachable Machine",
                 description:
                     "Label for the Teachable Machine extension category",
             }),
@@ -796,15 +796,11 @@ class Scratch3VideoSensingBlocks {
     }
 
     async startPredicting(modelDataUrl) {
-        console.log("[teachable-machine] startPredicting:", modelDataUrl);
         if (!this.predictionState[modelDataUrl]) {
             try {
                 this.predictionState[modelDataUrl] = {};
                 // https://github.com/googlecreativelab/teachablemachine-community/tree/master/libraries/image
                 const { model, type } = await this.initModel(modelDataUrl);
-                console.log(
-                    `[teachable-machine] initModel resolved, type = ${type}`
-                );
                 this.predictionState[modelDataUrl].modelType = type;
                 this.predictionState[modelDataUrl].model = model;
                 this.runtime.requestToolboxExtensionsUpdate();
@@ -829,13 +825,10 @@ class Scratch3VideoSensingBlocks {
                 this.predictionState[modelDataUrl] = {};
                 // The myQubit path can fail on auth, CORS or missing weights,
                 // so surface which model failed and why rather than a bare log.
-                // The message alone loses the stack, which is what says whether
-                // this came out of a fetch, tfjs or a validation check.
                 console.error(
                     `Model initialization failure for ${modelDataUrl}:`,
                     e && e.message ? e.message : e
                 );
-                console.error("[teachable-machine] full error object:", e);
                 this.runtime.emit(
                     this.runtime.constructor.PERIPHERAL_DISCONNECTED
                 );
