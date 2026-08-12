@@ -32,12 +32,26 @@ const getQubitsProjectParams = () => {
 };
 
 
-const resolveProjectModelUrl = async (modelUrl) => {
+/**
+ * Event emitted on the runtime while the project's model URL is being resolved.
+ * Payload: {loading: boolean, error: ?string}
+ * @type {string}
+ */
+const QUBITS_MODEL_LOADING = "QUBITS_MODEL_LOADING";
+
+const resolveProjectModelUrl = async (modelUrl, runtime) => {
     const project = getQubitsProjectParams();
     if (!project) {
         return modelUrl;
     }
     const apiUrl = `${project.fetchapiurl}/projects/${project.projectId}`;
+    const emitLoading = (loading, error = null) => {
+        if (runtime) {
+            runtime.emit(QUBITS_MODEL_LOADING, { loading, error });
+        }
+    };
+
+    emitLoading(true);
 
     let data;
     try {
@@ -52,10 +66,12 @@ const resolveProjectModelUrl = async (modelUrl) => {
         data = await response.json();
     } catch (e) {
         log.warn(`Could not read project from ${apiUrl}: ${e}`);
+        emitLoading(false, String(e));
         return modelUrl;
     }
 
     if (data && data.modelUrl) {
+        emitLoading(false);
         return data.modelUrl;
     }
 
@@ -78,8 +94,11 @@ const resolveProjectModelUrl = async (modelUrl) => {
         }
     } catch (e) {
         log.warn(`Could not save model URL to ${apiUrl}: ${e}`);
+        emitLoading(false, String(e));
+        return modelUrl;
     }
 
+    emitLoading(false);
     return modelUrl;
 };
 
@@ -707,11 +726,15 @@ class Scratch3VideoSensingBlocks {
         try {
             let modelUrl = this.modelArgumentToURL(modelArg);
             if (isQubitModelUrl(modelUrl)) {
-                modelUrl = await resolveProjectModelUrl(modelUrl);
+                modelUrl = await resolveProjectModelUrl(modelUrl, this.runtime);
             }
             this.getPredictionStateOrStartPredicting(modelUrl);
             this.updateStageModel(modelUrl);
         } catch (e) {
+            this.runtime.emit(QUBITS_MODEL_LOADING, {
+                loading: false,
+                error: String(e),
+            });
             this.teachableImageModel = null;
         }
     }
