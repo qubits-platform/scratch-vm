@@ -275,12 +275,8 @@ class QubitImageModel {
 const fetchWeights = async (trainingConfig, origin) => {
     const manifest = trainingConfig.modelJson.weightsManifest;
     const weightSpecs = manifest[0].weights;
-
-    // weightsPath is origin-relative ("ml-models/..."), not relative to the
-    // model endpoint - resolving against the latter would duplicate the prefix.
     const weightsUrl = new URL(trainingConfig.weightsPath, origin).href;
-    const url = new URLSearchParams(window.location.search)
-    console.log('url ---- ', url)
+
     const response = await fetch(weightsUrl, buildRequestInit());
     if (!response.ok) {
         throw new Error(

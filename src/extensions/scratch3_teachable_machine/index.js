@@ -15,6 +15,66 @@ const tmPose = require("@teachablemachine/pose");
 const tmAudioSpeechCommands = require("@tensorflow-models/speech-commands");
 
 const { isQubitModelUrl, loadQubitModel } = require("./qubit-model");
+const log = require("../../util/log");
+
+
+const getQubitsProjectParams = () => {
+    if (typeof window === "undefined" || !window.location) {
+        return null;
+    }
+    const params = new URLSearchParams(window.location.search);
+    const fetchapiurl = params.get("fetchapiurl");
+    const projectId = params.get("projectid");
+    if (!fetchapiurl || !projectId) {
+        return null;
+    }
+    return { fetchapiurl, projectId };
+};
+
+
+const resolveProjectModelUrl = async (modelUrl) => {
+    const project = getQubitsProjectParams();
+    if (!project) {
+        return modelUrl;
+    }
+    const apiUrl = `${project.fetchapiurl}/projects/${project.projectId}`;
+
+    let data;
+    try {
+        const response = await fetch(apiUrl, {
+            method: "GET",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+        });
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        data = await response.json();
+    } catch (e) {
+        log.warn(`Could not read project from ${apiUrl}: ${e}`);
+        return modelUrl;
+    }
+
+    if (data && data.modelUrl) {
+        return data.modelUrl;
+    }
+
+    try {
+        const responseput = await fetch(apiUrl, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ modelUrl }),
+            credentials: "include",
+        });
+        if (!responseput.ok) {
+            throw new Error(`HTTP ${responseput.status}`);
+        }
+    } catch (e) {
+        log.warn(`Could not save model URL to ${apiUrl}: ${e}`);
+    }
+
+    return modelUrl;
+};
 
 /**
  * Icon svg to be displayed in the blocks category menu, encoded as a data URI.
@@ -632,12 +692,16 @@ class Scratch3VideoSensingBlocks {
 
     useModelBlock(args, util) {
         const modelArg = args.MODEL_URL;
-        this.useModel(modelArg);
+
+        return this.useModel(modelArg);
     }
 
-    useModel(modelArg) {
+    async useModel(modelArg) {
         try {
-            const modelUrl = this.modelArgumentToURL(modelArg);
+            let modelUrl = this.modelArgumentToURL(modelArg);
+            if (isQubitModelUrl(modelUrl)) {
+                modelUrl = await resolveProjectModelUrl(modelUrl);
+            }
             this.getPredictionStateOrStartPredicting(modelUrl);
             this.updateStageModel(modelUrl);
         } catch (e) {
