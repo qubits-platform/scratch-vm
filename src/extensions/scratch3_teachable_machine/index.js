@@ -59,11 +59,18 @@ const resolveProjectModelUrl = async (modelUrl) => {
         return data.modelUrl;
     }
 
+     const structure = {
+        name: data.name,
+        projectType: data.projectType,
+        content: data.content,
+        modelUrl,
+    };
+
     try {
         const responseput = await fetch(apiUrl, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ modelUrl }),
+            body: JSON.stringify(structure),
             credentials: "include",
         });
         if (!responseput.ok) {
