@@ -33,25 +33,19 @@ const getQubitsProjectParams = () => {
 
 
 /**
- * Event emitted on the runtime while the project's model URL is being resolved.
- * Payload: {loading: boolean, error: ?string}
+ * Event emitted on the runtime while a model is being made ready to predict
+ * with - resolving the project's model URL, then fetching the model and its
+ * weights. Payload: {loading: boolean, error: ?string}
  * @type {string}
  */
 const QUBITS_MODEL_LOADING = "QUBITS_MODEL_LOADING";
 
-const resolveProjectModelUrl = async (modelUrl, runtime) => {
+const resolveProjectModelUrl = async (modelUrl) => {
     const project = getQubitsProjectParams();
     if (!project) {
         return modelUrl;
     }
     const apiUrl = `${project.fetchapiurl}/projects/${project.projectId}`;
-    const emitLoading = (loading, error = null) => {
-        if (runtime) {
-            runtime.emit(QUBITS_MODEL_LOADING, { loading, error });
-        }
-    };
-
-    emitLoading(true);
 
     let data;
     try {
@@ -66,12 +60,10 @@ const resolveProjectModelUrl = async (modelUrl, runtime) => {
         data = await response.json();
     } catch (e) {
         log.warn(`Could not read project from ${apiUrl}: ${e}`);
-        emitLoading(false, String(e));
         return modelUrl;
     }
 
     if (data && data.modelUrl) {
-        emitLoading(false);
         return data.modelUrl;
     }
 
@@ -94,11 +86,8 @@ const resolveProjectModelUrl = async (modelUrl, runtime) => {
         }
     } catch (e) {
         log.warn(`Could not save model URL to ${apiUrl}: ${e}`);
-        emitLoading(false, String(e));
-        return modelUrl;
     }
 
-    emitLoading(false);
     return modelUrl;
 };
 
@@ -205,6 +194,12 @@ class Scratch3VideoSensingBlocks {
          * @type {boolean}
          */
         this.firstInstall = true;
+
+        /**
+         * How many models are being loaded right now. See beginModelLoading.
+         * @type {number}
+         */
+        this.modelLoadingCount = 0;
 
         if (this.runtime.ioDevices) {
             // Configure the video device with values from globally stored locations.
@@ -722,20 +717,52 @@ class Scratch3VideoSensingBlocks {
         return this.useModel(modelArg);
     }
 
+    /**
+     * Mark the start of a load. Counted rather than a flag so that the URL
+     * resolve and the weight fetch that follows it read as one continuous
+     * loading state, and so two models loading at once do not have the first
+     * one to finish clear the other's spinner.
+     */
+    beginModelLoading() {
+        this.modelLoadingCount += 1;
+        if (this.modelLoadingCount === 1) {
+            this.runtime.emit(QUBITS_MODEL_LOADING, {
+                loading: true,
+                error: null,
+            });
+        }
+    }
+
+    /**
+     * Mark the end of a load.
+     * @param {?string} error - the failure, if it failed
+     */
+    endModelLoading(error = null) {
+        this.modelLoadingCount = Math.max(0, this.modelLoadingCount - 1);
+        if (error || this.modelLoadingCount === 0) {
+            this.runtime.emit(QUBITS_MODEL_LOADING, {
+                loading: this.modelLoadingCount > 0,
+                error: error,
+            });
+        }
+    }
+
     async useModel(modelArg) {
+        this.beginModelLoading();
         try {
             let modelUrl = this.modelArgumentToURL(modelArg);
             if (isQubitModelUrl(modelUrl)) {
-                modelUrl = await resolveProjectModelUrl(modelUrl, this.runtime);
+                modelUrl = await resolveProjectModelUrl(modelUrl);
             }
+            // startPredicting takes its own turn on the counter before this one
+            // is released, so the loading state carries straight through to the
+            // weight fetch instead of dropping in between.
             this.getPredictionStateOrStartPredicting(modelUrl);
             this.updateStageModel(modelUrl);
+            this.endModelLoading();
         } catch (e) {
-            this.runtime.emit(QUBITS_MODEL_LOADING, {
-                loading: false,
-                error: String(e),
-            });
             this.teachableImageModel = null;
+            this.endModelLoading(e && e.message ? e.message : String(e));
         }
     }
 
@@ -891,6 +918,11 @@ class Scratch3VideoSensingBlocks {
 
     async startPredicting(modelDataUrl) {
         if (!this.predictionState[modelDataUrl]) {
+            // Everything expensive - the model response, its weights, and the
+            // feature extractor / PoseNet / sentence encoder alongside them -
+            // is fetched under this, so the GUI stays in its loading state
+            // until the model can actually predict.
+            this.beginModelLoading();
             try {
                 this.predictionState[modelDataUrl] = {};
                 // https://github.com/googlecreativelab/teachablemachine-community/tree/master/libraries/image
@@ -915,6 +947,7 @@ class Scratch3VideoSensingBlocks {
                         );
                     }
                 }
+                this.endModelLoading();
             } catch (e) {
                 this.predictionState[modelDataUrl] = {};
                 // The myQubit path can fail on auth, CORS or missing weights,
@@ -923,6 +956,7 @@ class Scratch3VideoSensingBlocks {
                     `Model initialization failure for ${modelDataUrl}:`,
                     e && e.message ? e.message : e
                 );
+                this.endModelLoading(e && e.message ? e.message : String(e));
                 this.runtime.emit(
                     this.runtime.constructor.PERIPHERAL_DISCONNECTED
                 );
