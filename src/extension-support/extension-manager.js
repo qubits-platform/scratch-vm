@@ -27,6 +27,7 @@ const builtinExtensions = {
     teachableMachine: () => require("../extensions/scratch3_teachable_machine"),
     poseFace: () => require("../extensions/scratch3_pose_face"),
     poseHand: () => require("../extensions/scratch3_pose_hand"),
+    qubitsaimodel: () => require("../extensions/scratch3_qubitsaimodel"),
 };
 
 console.log("console log from extension manager in the heart");
