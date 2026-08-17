@@ -368,10 +368,14 @@ class Scratch3VideoSensingBlocks {
     reset() {}
 
     isConnected() {
-        return (
+        // The status button reads this. A placeholder entry is written into
+        // predictionState before the weights are fetched, so the presence of a
+        // key is not enough - only a loaded model counts as connected.
+        return Boolean(
             this.predictionState &&
             this.teachableImageModel &&
-            this.predictionState.hasOwnProperty(this.teachableImageModel)
+            this.predictionState[this.teachableImageModel] &&
+            this.predictionState[this.teachableImageModel].model
         );
     }
 
@@ -893,10 +897,19 @@ class Scratch3VideoSensingBlocks {
         if (!this.predictionState[modelDataUrl]) {
             try {
                 this.predictionState[modelDataUrl] = {};
+                // Swapping models leaves the button green from the previous
+                // one, so knock it back down while these weights download.
+                this.runtime.emit(
+                    this.runtime.constructor.PERIPHERAL_DISCONNECTED
+                );
                 // https://github.com/googlecreativelab/teachablemachine-community/tree/master/libraries/image
                 const { model, type } = await this.initModel(modelDataUrl);
                 this.predictionState[modelDataUrl].modelType = type;
                 this.predictionState[modelDataUrl].model = model;
+                // The weights are in, so the status button can go green now.
+                this.runtime.emit(
+                    this.runtime.constructor.PERIPHERAL_CONNECTED
+                );
                 this.runtime.requestToolboxExtensionsUpdate();
 
                 // Listening prompts for the microphone, which the user can sit
