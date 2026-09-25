@@ -8,7 +8,7 @@ const tmAudioSpeechCommands = require("@tensorflow-models/speech-commands");
 const { loadPoseNet } = require("@teachablemachine/pose/dist/custom-posenet");
 
 
-const QUBIT_HOST_PATTERN = /(^|\.)myqubit\.co$/i;
+const QUBIT_HOST_PATTERN = /(^|\.)(qubitslearn\.(me|in|com)|myqubit\.co)$/i;
 
 const IMAGE_SIZE = 224;
 
